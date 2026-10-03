@@ -190,6 +190,9 @@
       },
       "nanoprotect_filter": {
         "name": "NanoProtect филтър"
+      },
+      "error_code": {
+        "name": "Код на грешка"
       }
     },
     "switch": {

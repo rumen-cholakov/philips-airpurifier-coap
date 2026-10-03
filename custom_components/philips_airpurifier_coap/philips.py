@@ -2210,7 +2210,10 @@ class PhilipsHU5710(PhilipsNew2GenericFan):
         PhilipsApi.NEW2_AMBIENT_LIGHT_MODE,
     ]
     # AVAILABLE_NUMBERS = [PhilipsApi.NEW2_HUMIDITY_TARGET2]
-    AVAILABLE_BINARY_SENSORS: ClassVar = [PhilipsApi.NEW2_ERROR_CODE]
+    # tank sensor that also catches the unit being lifted off its tank (bit 10), not only an empty tank
+    AVAILABLE_BINARY_SENSORS: ClassVar = [PhilipsApi.NEW2_ERROR_CODE2]
+    # raw error bitfield; the fan entity that would carry it as an attribute is not created (CREATE_FAN)
+    EXTRA_SENSORS: ClassVar = [PhilipsApi.NEW2_ERROR_CODE]
     AVAILABLE_HUMIDIFIERS: ClassVar = [PhilipsApi.NEW2_HUMIDITY_TARGET2]
 
 

@@ -470,6 +470,7 @@ class PhilipsApi:
     NEW2_GAS = "D03122"
     NEW2_HUMIDITY = "D03125"
     NEW2_ERROR_CODE = "D03240"
+    NEW2_ERROR_CODE2 = "D03240#2"  # HU5710: tank empty (bit 8) or unit lifted off its tank (bit 10)
     NEW2_HUMIDITY_TARGET = "D03128#1"
     NEW2_HUMIDITY_TARGET2 = "D03128#2"
     NEW2_HUMIDIFYING = "D0312B"
@@ -742,7 +743,14 @@ SENSOR_TYPES: dict[str, SensorDescription] = {
 }
 
 
-EXTRA_SENSOR_TYPES: dict[str, SensorDescription] = {}
+EXTRA_SENSOR_TYPES: dict[str, SensorDescription] = {
+    PhilipsApi.NEW2_ERROR_CODE: {
+        # raw error bitfield as an unsigned 16-bit number (the device reports it signed, e.g. -15360 = 0xC400)
+        FanAttributes.LABEL: FanAttributes.ERROR_CODE,
+        FanAttributes.VALUE: lambda value, _: value & 0xFFFF,
+        CONF_ENTITY_CATEGORY: EntityCategory.DIAGNOSTIC,
+    },
+}
 
 BINARY_SENSOR_TYPES: dict[str, SensorDescription] = {
     # binary device sensors
@@ -758,6 +766,15 @@ BINARY_SENSOR_TYPES: dict[str, SensorDescription] = {
         FanAttributes.LABEL: FanAttributes.WATER_TANK,
         ATTR_DEVICE_CLASS: SensorDeviceClass.MOISTURE,
         FanAttributes.VALUE: lambda value: not value & (1 << 8),
+        CONF_ENTITY_CATEGORY: EntityCategory.DIAGNOSTIC,
+    },
+    PhilipsApi.NEW2_ERROR_CODE2: {
+        # HU5710: bit 8 = tank empty (issue #187, -16128 = 0xC100); bit 10 = unit lifted off its tank, where
+        # the RH reading freezes (-15360 = 0xC400, seen on firmware 0.4.7 / AWS_Philips_AIR_Combo@86).
+        # Testing bit 8 alone reported "not empty" with the unit off its tank.
+        FanAttributes.LABEL: FanAttributes.WATER_TANK,
+        ATTR_DEVICE_CLASS: SensorDeviceClass.MOISTURE,
+        FanAttributes.VALUE: lambda value: not value & ((1 << 8) | (1 << 10)),
         CONF_ENTITY_CATEGORY: EntityCategory.DIAGNOSTIC,
     },
     PhilipsApi.FUNCTION: {

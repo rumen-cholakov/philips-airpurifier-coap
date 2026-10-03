@@ -42,7 +42,7 @@ async def async_setup_entry(
     binary_sensors = [
         PhilipsBinarySensor(hass, entry, config_entry_data, binary_sensor)
         for binary_sensor in BINARY_SENSOR_TYPES
-        if binary_sensor in status and binary_sensor in available_binary_sensors
+        if binary_sensor.partition("#")[0] in status and binary_sensor in available_binary_sensors
     ]
 
     async_add_entities(binary_sensors, update_before_add=False)
@@ -79,7 +79,8 @@ class PhilipsBinarySensor(PhilipsEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         """Return the state of the binary sensor."""
-        value = self._device_status[self.kind]
+        # a "#N" suffix selects an alternative description for the same status key (as in light/select)
+        value = self._device_status[self.kind.partition("#")[0]]
         convert = self._description.get(FanAttributes.VALUE)
         if convert:
             value = convert(value)

@@ -206,6 +206,9 @@
       },
       "nanoprotect_filter": {
         "name": "NanoProtect filter"
+      },
+      "error_code": {
+        "name": "Error code"
       }
     },
     "switch": {

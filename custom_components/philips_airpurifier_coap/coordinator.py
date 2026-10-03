@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from asyncio.tasks import Task
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -23,6 +24,23 @@ MISSED_PACKAGE_COUNT = 3
 # Re-registration delay after the observation itself ended; doubles on repeats, capped.
 OBSERVE_RETRY_S = 2
 OBSERVE_RETRY_MAX_S = 60
+
+# Keep-alive (KEEPALIVE_S = 0 disables it). After KEEPALIVE_S without a push, ask the device for /sys/dev/info
+# over the observation's own socket. A quiet device can send nothing for minutes (an HU5710 without its cloud
+# connection drops the ~20 s periodic report), longer than a stateful firewall keeps the UDP flow (Linux
+# conntrack: 120 s once established), which then drops the device's later pushes without telling anyone. The
+# request and its answer use the same 5-tuple as the pushes and refresh the flow. Keep KEEPALIVE_S below the
+# shortest UDP timeout between HA and the device.
+# /sys/dev/info is plaintext, needs no sync, and does not touch the observation: on an HU5710 it answered in
+# under 1 s while another client's observation kept receiving pushes.
+# An answer proves the device is reachable, so it resets the disconnect watchdog. It does not prove the
+# observation is still registered (a device restart forgets it), so after RESUBSCRIBE_S without a push the
+# observation is re-registered on the same client. If that brings no push either, the watchdog is left to run
+# out and does the full reconnect, as before.
+KEEPALIVE_S = 60
+KEEPALIVE_TIMEOUT_S = 10
+RESUBSCRIBE_S = 180  # the watchdog's default (max_age 60 s x 3): a restarted device is noticed no later than before
+INFO_PATH = "/sys/dev/info"
 
 
 class Coordinator:
@@ -48,6 +66,8 @@ class Coordinator:
         self._reconnect_task: Task | None = None
         self._timeout: int = 60
         self._skipped_messages = 0
+        self._last_push = time.monotonic()
+        self._resubscribed = False
 
         self._timer_disconnected = Timer(
             timeout=self._timeout * MISSED_PACKAGE_COUNT,
@@ -55,6 +75,10 @@ class Coordinator:
             autostart=True,
         )
         self._timer_disconnected.setAutoRestart(True)
+
+        self._timer_keepalive: Timer | None = None
+        if KEEPALIVE_S:
+            self._timer_keepalive = Timer(timeout=KEEPALIVE_S, callback=self._keepalive, autostart=False)
 
     async def shutdown(self):
         """Shutdown the API connection."""
@@ -64,6 +88,8 @@ class Coordinator:
 
         if self._timer_disconnected is not None:
             self._timer_disconnected.cancel()
+
+        self._stop_keepalive()
 
         if self.client is not None:
             await self.client.shutdown()
@@ -142,6 +168,45 @@ class Coordinator:
         if not self._listeners and self._task:
             self._task.cancel()
             self._task = None
+            self._stop_keepalive()
+
+    def _stop_keepalive(self) -> None:
+        """Stop the keep-alive timer, at the latest when its current run ends."""
+
+        if self._timer_keepalive is not None:
+            self._timer_keepalive.setAutoRestart(False)
+            with contextlib.suppress(Exception):
+                self._timer_keepalive.cancel()
+
+    async def _keepalive(self) -> None:
+        """No push for KEEPALIVE_S: check the device over the observation's own socket (see KEEPALIVE_S)."""
+
+        client = self.client
+        if not self._listeners or client is None:
+            return
+        request = Message(code=GET, mtype=NON, uri=f"coap://{client.host}:{client.port}{INFO_PATH}")
+        try:
+            response = await asyncio.wait_for(client._ctx.request(request).response, KEEPALIVE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:  # no answer: the disconnect watchdog decides
+            _LOGGER.debug("keep-alive: no answer from %s (%s)", self.host, type(ex).__name__)
+            return
+
+        silence = time.monotonic() - self._last_push
+        _LOGGER.debug("keep-alive: %s answered %s; no push for %.0fs", self.host, response.code, silence)
+        if silence < RESUBSCRIBE_S:
+            self._timer_disconnected.reset()
+        elif not self._resubscribed:
+            _LOGGER.debug(
+                "No push from %s for %.0fs although it answers; re-registering the observation", self.host, silence
+            )
+            self._resubscribed = True
+            self._timer_disconnected.reset()
+            if self._task:
+                self._task.cancel()
+            self._task = asyncio.create_task(self._async_observe_status())
+        # else: the re-registration brought no push either; the watchdog runs out and reconnects.
 
     def _decode(self, client: CoAPClient, response: Message) -> dict[str, Any] | None:
         """Return the reported state in a status message, or None if the message cannot be read."""
@@ -211,7 +276,11 @@ class Coordinator:
                 async for status in self._observe_status():
                     delay = OBSERVE_RETRY_S
                     self.status = status
+                    self._last_push = time.monotonic()
+                    self._resubscribed = False
                     self._timer_disconnected.reset()
+                    if self._timer_keepalive is not None:
+                        self._timer_keepalive.reset()
                     for update_callback in self._listeners:
                         update_callback()
                 _LOGGER.warning("Observation of %s ended; re-registering in %ss", self.host, delay)
@@ -237,3 +306,8 @@ class Coordinator:
 
         self._task = asyncio.create_task(self._async_observe_status())
         self._timer_disconnected.reset()
+        self._last_push = time.monotonic()
+        self._resubscribed = False
+        if self._timer_keepalive is not None:
+            self._timer_keepalive.setAutoRestart(True)
+            self._timer_keepalive.reset()

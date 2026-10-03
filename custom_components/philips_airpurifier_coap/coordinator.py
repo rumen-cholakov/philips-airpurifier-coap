@@ -81,18 +81,35 @@ class Coordinator:
             self._timer_keepalive = Timer(timeout=KEEPALIVE_S, callback=self._keepalive, autostart=False)
 
     async def shutdown(self):
-        """Shutdown the API connection."""
+        """Shutdown the API connection.
 
-        if self._reconnect_task is not None:
-            self._reconnect_task.cancel()
+        Must not raise: anything raised here propagates out of async_unload_entry and leaves the config entry in
+        FAILED_UNLOAD, which only a Home Assistant restart clears. Safe to call more than once.
+        """
 
-        if self._timer_disconnected is not None:
-            self._timer_disconnected.cancel()
+        # Forced: a plain cancel() raises while the timer's callback runs (unloading during a reconnect, or
+        # during a keep-alive request), and the auto-restarting timer would then outlive the entry.
+        for timer in (self._timer_disconnected, self._timer_keepalive):
+            if timer is not None:
+                timer.setAutoRestart(False)
+                timer.cancel(msg="SHUTDOWN", force=True)
 
-        self._stop_keepalive()
+        # Let the cancelled tasks finish (the observation's finally block cancels the CoAP observation) before
+        # the client context goes away.
+        tasks = [task for task in (self._task, self._reconnect_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._task = None
+        self._reconnect_task = None
 
         if self.client is not None:
-            await self.client.shutdown()
+            # The client may already be shut down, e.g. after a _reconnect() whose create() failed. Shutting an
+            # aiocoap context down a second time raises AttributeError.
+            with contextlib.suppress(Exception):
+                await self.client.shutdown()
+            self.client = None
 
     async def reconnect(self):
         """Reconnect to the API connection."""
@@ -113,10 +130,16 @@ class Coordinator:
         try:
             # Stop observing first, or the observe loop keeps re-registering on the closed client.
             if self._task:
-                self._task.cancel()
-                self._task = None
+                task, self._task = self._task, None
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             with contextlib.suppress(Exception):
                 await self.client.shutdown()
+
+            # Drop the client just shut down before reconnecting. If create() fails, which it does while the
+            # device is unreachable, self.client must not keep pointing at a closed aiocoap context.
+            self.client = None
+
             self.client = await CoAPClient.create(self.host)
             self._start_observing()
 
@@ -166,8 +189,8 @@ class Coordinator:
         self._listeners.remove(update_callback)
 
         if not self._listeners and self._task:
+            # Keep the reference, so shutdown() can wait for the cancellation to finish.
             self._task.cancel()
-            self._task = None
             self._stop_keepalive()
 
     def _stop_keepalive(self) -> None:

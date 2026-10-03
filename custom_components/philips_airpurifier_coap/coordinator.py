@@ -2,12 +2,15 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 from asyncio.tasks import Task
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from aioairctrl import CoAPClient
+from aiocoap import NON, Message
+from aiocoap.numbers.codes import GET
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 
@@ -16,6 +19,10 @@ from .timer import Timer
 _LOGGER = logging.getLogger(__name__)
 
 MISSED_PACKAGE_COUNT = 3
+
+# Re-registration delay after the observation itself ended; doubles on repeats, capped.
+OBSERVE_RETRY_S = 2
+OBSERVE_RETRY_MAX_S = 60
 
 
 class Coordinator:
@@ -40,6 +47,7 @@ class Coordinator:
 
         self._reconnect_task: Task | None = None
         self._timeout: int = 60
+        self._skipped_messages = 0
 
         self._timer_disconnected = Timer(
             timeout=self._timeout * MISSED_PACKAGE_COUNT,
@@ -77,6 +85,10 @@ class Coordinator:
         """Reconnect to the API connection."""
 
         try:
+            # Stop observing first, or the observe loop keeps re-registering on the closed client.
+            if self._task:
+                self._task.cancel()
+                self._task = None
             with contextlib.suppress(Exception):
                 await self.client.shutdown()
             self.client = await CoAPClient.create(self.host)
@@ -131,14 +143,90 @@ class Coordinator:
             self._task.cancel()
             self._task = None
 
-    async def _async_observe_status(self) -> None:
-        """Observe the status of the device."""
+    def _decode(self, client: CoAPClient, response: Message) -> dict[str, Any] | None:
+        """Return the reported state in a status message, or None if the message cannot be read."""
 
-        async for status in self.client.observe_status():
-            self.status = status
-            self._timer_disconnected.reset()
-            for update_callback in self._listeners:
-                update_callback()
+        try:
+            payload = client._enc.decrypt(response.payload.decode())
+            status = json.loads(payload)["state"]["reported"]
+        except Exception as ex:  # one bad message must not end the observation
+            self._skipped_messages += 1
+            _LOGGER.warning(
+                "Skipping undecodable status message from %s (%s: %s); %d skipped so far",
+                self.host,
+                type(ex).__name__,
+                ex,
+                self._skipped_messages,
+            )
+            _LOGGER.debug("undecodable payload: %r", response.payload)
+            return None
+        # Same text as aioairctrl's own log line, so log analysis counts pushes the same way.
+        _LOGGER.debug("observation status: %s", payload)
+        return status
+
+    async def _observe_status(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield each status the device pushes, skipping messages that cannot be decoded.
+
+        This is aioairctrl's Client.observe_status() with one difference. There, a message that cannot be
+        decoded raises, and the whole observation ends with it. Some devices send such messages: seen on an
+        HU5710 (firmware 0.4.7 / AWS_Philips_AIR_Combo@86), where about 4 % of the periodic reports carried NUL
+        bytes inside the hex payload (ValueError from bytes.fromhex; the digest matched the corrupted text).
+        The observation then stayed dead until the disconnect watchdog reconnected (max_age x
+        MISSED_PACKAGE_COUNT, 180 s). Here the message is logged and skipped, and later pushes still arrive.
+        The first answer is guarded too, and so is a well-formed message that lacks state.reported.
+
+        Uses aioairctrl's client context and encryption context (_ctx, _enc), as of the pinned version.
+        """
+
+        client = self.client
+        request = Message(code=GET, mtype=NON, uri=f"coap://{client.host}:{client.port}{client.STATUS_PATH}")
+        request.opt.observe = 0
+        requester = client._ctx.request(request)
+        observation = requester.observation
+        try:
+            status = self._decode(client, await requester.response)
+            if status is not None:
+                yield status
+            if observation is not None:
+                async for response in observation:
+                    status = self._decode(client, response)
+                    if status is not None:
+                        yield status
+        finally:
+            # An observation that ended with an error is already cancelled; cancelling again raises
+            # AssertionError, which would hide the error (or a CancelledError) on its way out.
+            if observation is not None and not observation.cancelled:
+                observation.cancel()
+
+    async def _async_observe_status(self) -> None:
+        """Observe the status of the device.
+
+        If the observation itself ends (an error from the CoAP layer, or the device ending it), register a new
+        one after a short delay, rather than waiting for the disconnect watchdog.
+        """
+
+        delay = OBSERVE_RETRY_S
+        while True:
+            try:
+                async for status in self._observe_status():
+                    delay = OBSERVE_RETRY_S
+                    self.status = status
+                    self._timer_disconnected.reset()
+                    for update_callback in self._listeners:
+                        update_callback()
+                _LOGGER.warning("Observation of %s ended; re-registering in %ss", self.host, delay)
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                _LOGGER.warning(
+                    "Observation of %s failed (%s: %s); re-registering in %ss",
+                    self.host,
+                    type(ex).__name__,
+                    ex,
+                    delay,
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, OBSERVE_RETRY_MAX_S)
 
     def _start_observing(self) -> None:
         """Schedule state observation."""

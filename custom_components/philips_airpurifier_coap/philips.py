@@ -2215,6 +2215,12 @@ class PhilipsHU5710(PhilipsNew2GenericFan):
     # raw error bitfield; the fan entity that would carry it as an attribute is not created (CREATE_FAN)
     EXTRA_SENSORS: ClassVar = [PhilipsApi.NEW2_ERROR_CODE]
     AVAILABLE_HUMIDIFIERS: ClassVar = [PhilipsApi.NEW2_HUMIDITY_TARGET2]
+    # the generic NanoProtect filter keys are this humidifier's wick counters: hours left until cleaning
+    # (of 360) and until replacement (of 1800); the percentages match the Air+ app's Device Health
+    FILTER_LABELS: ClassVar = {
+        PhilipsApi.NEW2_FILTER_NANOPROTECT_PREFILTER: FanAttributes.FILTER_CLEANING,
+        PhilipsApi.NEW2_FILTER_NANOPROTECT: FanAttributes.FILTER_LIFETIME,
+    }
 
 
 model_to_class = {

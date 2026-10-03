@@ -286,6 +286,8 @@ class FanAttributes(StrEnum):
     FILTER_ACTIVE_CARBON = "active_carbon_filter"
     FILTER_WICK = "wick"
     FILTER_NANOPROTECT = "nanoprotect_filter"
+    FILTER_CLEANING = "filter_cleaning"
+    FILTER_LIFETIME = "filter_lifetime"
     FILTER_NANOPROTECT_CLEAN = "pre_filter"
     FUNCTION = "function"
     PURIFICATION = "purification"

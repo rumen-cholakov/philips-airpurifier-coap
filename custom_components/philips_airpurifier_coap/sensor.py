@@ -171,6 +171,10 @@ class PhilipsFilterSensor(PhilipsEntity, SensorEntity):
         self._total_key = self._description[FanAttributes.TOTAL]
         self._type_key = self._description[FanAttributes.TYPE]
         self._attr_translation_key = self._description.get(FanAttributes.LABEL)
+        # a model may rename a filter (e.g. a humidifier's wick); the unique_id below keeps the generic label
+        model_labels = getattr(model_to_class.get(self._model), "FILTER_LABELS", {})
+        if kind in model_labels:
+            self._attr_translation_key = model_labels[kind]
 
         if self._has_total:
             self._attr_native_unit_of_measurement = PERCENTAGE

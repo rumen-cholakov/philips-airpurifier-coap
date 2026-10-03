@@ -209,6 +209,12 @@
       },
       "error_code": {
         "name": "Error code"
+      },
+      "filter_cleaning": {
+        "name": "Filter cleaning"
+      },
+      "filter_lifetime": {
+        "name": "Filter lifetime"
       }
     },
     "switch": {

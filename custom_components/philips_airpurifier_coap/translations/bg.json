@@ -193,6 +193,12 @@
       },
       "error_code": {
         "name": "Код на грешка"
+      },
+      "filter_cleaning": {
+        "name": "Почистване на филтъра"
+      },
+      "filter_lifetime": {
+        "name": "Живот на филтъра"
       }
     },
     "switch": {
